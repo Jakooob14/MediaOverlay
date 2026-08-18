@@ -63,6 +63,14 @@ public partial class MainWindow : Window
     private System.Windows.Forms.NotifyIcon? _notifyIcon;
     private CancellationTokenSource? _hideTimerCts;
     
+    // File Watcher & Menu Fields
+    private FileSystemWatcher? _settingsWatcher;
+    private System.Windows.Forms.ToolStripMenuItem? _mnuKeepVisible;
+    private System.Windows.Forms.ToolStripMenuItem? _mnuEscHiding;
+    private System.Windows.Forms.ToolStripMenuItem? _mnuSpotify;
+    private System.Windows.Forms.ToolStripMenuItem? _mnuLockPosition;
+    private System.Windows.Forms.ToolStripMenuItem? _mnuDynamicBorder;
+    
     public MainWindow()
     {
         InitializeComponent();
@@ -107,9 +115,11 @@ public partial class MainWindow : Window
             Top = _settings.WindowTop;
         }
 
+        ApplyVisualSettings();
         ApplyClickThroughState();
         SetupGlobalHook();
         SetupTrayIcon();
+        SetupSettingsWatcher();
 
         _sessionManager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
         _sessionManager.CurrentSessionChanged += async (_, _) => await UpdateCurrentSessionAsync();
@@ -326,6 +336,45 @@ public partial class MainWindow : Window
         }
     }
 
+    private void SetupSettingsWatcher()
+    {
+        var folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MediaOverlay");
+        Directory.CreateDirectory(folder);
+        _settingsWatcher = new FileSystemWatcher(folder, "settings.json")
+        {
+            NotifyFilter = NotifyFilters.LastWrite,
+            EnableRaisingEvents = true
+        };
+        _settingsWatcher.Changed += (s, e) => {
+            System.Threading.Thread.Sleep(100); 
+            Dispatcher.Invoke(() => {
+                LoadSettings();
+                ApplyVisualSettings();
+                UpdateTrayMenuChecks();
+            });
+        };
+    }
+
+    private void ApplyVisualSettings()
+    {
+        Opacity = _settings.OverlayOpacity;
+        AlbumArtBorder.Visibility = _settings.ShowAlbumArt ? Visibility.Visible : Visibility.Collapsed;
+        BackgroundGrid.Visibility = _settings.ShowBackgroundArt ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void UpdateTrayMenuChecks()
+    {
+        if (_mnuKeepVisible != null) _mnuKeepVisible.Checked = _settings.KeepOverlayVisible;
+        if (_mnuEscHiding != null) _mnuEscHiding.Checked = _settings.EnableEscKeyHiding;
+        if (_mnuSpotify != null) _mnuSpotify.Checked = _settings.ListenOnlyForSpotify;
+        if (_mnuLockPosition != null)
+        {
+            _mnuLockPosition.Checked = _settings.LockPosition;
+            ApplyClickThroughState();
+        }
+        if (_mnuDynamicBorder != null) _mnuDynamicBorder.Checked = _settings.UseDynamicBorderColor;
+    }
+
     private void SetupTrayIcon()
     {
         _notifyIcon = new System.Windows.Forms.NotifyIcon
@@ -339,7 +388,7 @@ public partial class MainWindow : Window
 
         var mnuShow = new System.Windows.Forms.ToolStripMenuItem("Show overlay", null, (s, e) => ShowOverlayTemporarily());
         
-        var mnuKeepVisible = new System.Windows.Forms.ToolStripMenuItem("Keep overlay visible", null, (s, e) => 
+        _mnuKeepVisible = new System.Windows.Forms.ToolStripMenuItem("Keep overlay visible", null, (s, e) => 
         {
             _settings.KeepOverlayVisible = !_settings.KeepOverlayVisible;
             ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.KeepOverlayVisible;
@@ -348,14 +397,14 @@ public partial class MainWindow : Window
             SaveSettings();
         }) { Checked = _settings.KeepOverlayVisible };
 
-        var mnuEscHiding = new System.Windows.Forms.ToolStripMenuItem("Enable ESC key hiding", null, (s, e) => 
+        _mnuEscHiding = new System.Windows.Forms.ToolStripMenuItem("Enable ESC key hiding", null, (s, e) => 
         {
             _settings.EnableEscKeyHiding = !_settings.EnableEscKeyHiding;
             ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.EnableEscKeyHiding;
             SaveSettings();
         }) { Checked = _settings.EnableEscKeyHiding };
 
-        var mnuSpotify = new System.Windows.Forms.ToolStripMenuItem("Listen only for Spotify", null, async (s, e) => 
+        _mnuSpotify = new System.Windows.Forms.ToolStripMenuItem("Listen only for Spotify", null, async (s, e) => 
         {
             _settings.ListenOnlyForSpotify = !_settings.ListenOnlyForSpotify;
             ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.ListenOnlyForSpotify;
@@ -363,7 +412,7 @@ public partial class MainWindow : Window
             await UpdateCurrentSessionAsync();
         }) { Checked = _settings.ListenOnlyForSpotify };
 
-        var mnuLockPosition = new System.Windows.Forms.ToolStripMenuItem("Lock position", null, (s, e) => 
+        _mnuLockPosition = new System.Windows.Forms.ToolStripMenuItem("Lock position", null, (s, e) => 
         {
             _settings.LockPosition = !_settings.LockPosition;
             ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.LockPosition;
@@ -378,7 +427,7 @@ public partial class MainWindow : Window
             ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = !currentState;
         }) { Checked = CheckStartWithWindows() };
 
-        var mnuDynamicBorder = new System.Windows.Forms.ToolStripMenuItem("Use dynamic border color", null, (s, e) => 
+        _mnuDynamicBorder = new System.Windows.Forms.ToolStripMenuItem("Use dynamic border color", null, (s, e) => 
         {
             _settings.UseDynamicBorderColor = !_settings.UseDynamicBorderColor;
             ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.UseDynamicBorderColor;
@@ -396,18 +445,30 @@ public partial class MainWindow : Window
             SaveSettings();
         });
 
+        var mnuAdvancedSettings = new System.Windows.Forms.ToolStripMenuItem("Advanced Settings...", null, (s, e) => 
+        {
+            var folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MediaOverlay");
+            var file = System.IO.Path.Combine(folder, "settings.json");
+            
+            // Ensure settings exist before opening
+            if (!File.Exists(file)) SaveSettings();
+
+            Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
+        });
+
         var mnuExit = new System.Windows.Forms.ToolStripMenuItem("Exit", null, (s, e) => Application.Current.Shutdown());
 
         menu.Items.Add(mnuShow);
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
-        menu.Items.Add(mnuKeepVisible);
-        menu.Items.Add(mnuEscHiding);
-        menu.Items.Add(mnuSpotify);
-        menu.Items.Add(mnuLockPosition);
+        menu.Items.Add(_mnuKeepVisible);
+        menu.Items.Add(_mnuEscHiding);
+        menu.Items.Add(_mnuSpotify);
+        menu.Items.Add(_mnuLockPosition);
         menu.Items.Add(mnuStartWindows);
-        menu.Items.Add(mnuDynamicBorder);
+        menu.Items.Add(_mnuDynamicBorder);
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         menu.Items.Add(mnuResetPos);
+        menu.Items.Add(mnuAdvancedSettings);
         menu.Items.Add(mnuExit);
 
         _notifyIcon.ContextMenuStrip = menu;
@@ -448,4 +509,10 @@ public class AppSettings
     public bool UseDynamicBorderColor { get; set; } = true;
     public double WindowLeft { get; set; } = double.NaN;
     public double WindowTop { get; set; } = double.NaN;
+    
+    // Advanced Settings
+    public int SecondsShown { get; set; } = 4;
+    public double OverlayOpacity { get; set; } = 1.0;
+    public bool ShowAlbumArt { get; set; } = true;
+    public bool ShowBackgroundArt { get; set; } = true;
 }

@@ -46,7 +46,7 @@
 
             <Grid>
                 <Border x:Name="MaskBorder" Background="White" CornerRadius="8" />
-                <Grid ClipToBounds="True">
+                <Grid ClipToBounds="True" x:Name="BackgroundGrid">
                     <Grid.OpacityMask>
                         <VisualBrush Visual="{Binding ElementName=MaskBorder}" Stretch="None" />
                     </Grid.OpacityMask>
@@ -67,7 +67,7 @@
                 </Grid.ColumnDefinitions>
 
                 <!-- Album Art -->
-                <Border Grid.Column="0" Width="48" Height="48" CornerRadius="4" Background="#282828">
+                <Border x:Name="AlbumArtBorder" Grid.Column="0" Width="48" Height="48" CornerRadius="4" Background="#282828">
                     <Rectangle RadiusX="4" RadiusY="4">
                         <Rectangle.Fill>
                             <ImageBrush x:Name="AlbumArtImage" Stretch="UniformToFill"/>
