@@ -104,6 +104,12 @@ public partial class MainWindow : Window
         };
     }
     
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        ApplyClickThroughState();
+    }
+
     private void OnClosed(object? sender, EventArgs e)
     {
         if (_hookID != IntPtr.Zero)
@@ -120,7 +126,6 @@ public partial class MainWindow : Window
     {
 
         ApplyVisualSettings();
-        ApplyClickThroughState();
         SetupGlobalHook();
         SetupTrayIcon();
         SetupSettingsWatcher();
@@ -244,6 +249,7 @@ public partial class MainWindow : Window
 
     #region Win32 Click-Through
     private const int WS_EX_TRANSPARENT = 0x00000020;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int GWL_EXSTYLE = -20;
 
     [DllImport("user32.dll")]
@@ -256,6 +262,10 @@ public partial class MainWindow : Window
     {
         var hwnd = new WindowInteropHelper(this).Handle;
         int extendedStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+        
+        // Add WS_EX_TOOLWINDOW to hide from Alt+Tab
+        extendedStyle |= WS_EX_TOOLWINDOW;
+        
         if (_settings.LockPosition)
             SetWindowLong(hwnd, GWL_EXSTYLE, extendedStyle | WS_EX_TRANSPARENT);
         else
