@@ -379,7 +379,7 @@ public partial class MainWindow : Window
     {
         _notifyIcon = new System.Windows.Forms.NotifyIcon
         {
-            Icon = System.Drawing.SystemIcons.Information,
+            Icon = new System.Drawing.Icon("icon.ico"),
             Visible = true,
             Text = "Media Overlay"
         };
