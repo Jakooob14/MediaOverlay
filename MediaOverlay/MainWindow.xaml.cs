@@ -74,6 +74,20 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        
+        // Load settings and position early to avoid OS window cascading
+        LoadSettings();
+        if (double.IsNaN(_settings.WindowLeft) || double.IsNaN(_settings.WindowTop))
+        {
+            PositionTopRight();
+        }
+        else
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Left = _settings.WindowLeft;
+            Top = _settings.WindowTop;
+        }
+
         Loaded += OnLoaded;
         Closed += OnClosed;
         MouseDown += (s, e) => {
@@ -104,16 +118,6 @@ public partial class MainWindow : Window
     
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        LoadSettings();
-        if (double.IsNaN(_settings.WindowLeft) || double.IsNaN(_settings.WindowTop))
-        {
-            PositionTopRight();
-        }
-        else
-        {
-            Left = _settings.WindowLeft;
-            Top = _settings.WindowTop;
-        }
 
         ApplyVisualSettings();
         ApplyClickThroughState();
