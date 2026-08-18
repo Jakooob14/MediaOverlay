@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -27,12 +28,20 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Closed += OnClosed;
+    }
+    
+    private void OnClosed(object? sender, EventArgs e)
+    {
+        if (_hookID != IntPtr.Zero)
+            UnhookWindowsHookEx(_hookID);
     }
     
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         PositionTopRight();
         EnableClickThrough();
+        SetupGlobalHook();
 
         _sessionManager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
         _sessionManager.CurrentSessionChanged += async (_, _) => await UpdateCurrentSessionAsync();
@@ -159,6 +168,62 @@ public partial class MainWindow : Window
         var hwnd = new WindowInteropHelper(this).Handle;
         int extendedStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
         SetWindowLong(hwnd, GWL_EXSTYLE, extendedStyle | WS_EX_TRANSPARENT);
+    }
+    #endregion
+
+    #region Global Keyboard Hook for ESC
+    private const int WH_KEYBOARD_LL = 13;
+    private const int WM_KEYDOWN = 0x0100;
+    private static LowLevelKeyboardProc? _proc;
+    private static IntPtr _hookID = IntPtr.Zero;
+
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    private void SetupGlobalHook()
+    {
+        _proc = HookCallback;
+        using var curProcess = Process.GetCurrentProcess();
+        using var curModule = curProcess.MainModule;
+        if (curModule?.ModuleName != null)
+        {
+            _hookID = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, GetModuleHandle(curModule.ModuleName), 0);
+        }
+    }
+
+    private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
+        {
+            int vkCode = Marshal.ReadInt32(lParam);
+            if (vkCode == 0x1B) // VK_ESCAPE
+            {
+                Dispatcher.Invoke(HideOverlay);
+            }
+        }
+        return CallNextHookEx(_hookID, nCode, wParam, lParam);
+    }
+
+    private void HideOverlay()
+    {
+        var fadeOut = new DoubleAnimation
+        {
+            To = 0,
+            Duration = TimeSpan.FromSeconds(0.2)
+        };
+        CardContainer.BeginAnimation(UIElement.OpacityProperty, fadeOut);
     }
     #endregion
 }
