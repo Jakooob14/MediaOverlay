@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -15,6 +16,8 @@ using System.Windows.Navigation;
 using System.Windows.Shapes;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
+using Application = System.Windows.Application;
+using Color = System.Windows.Media.Color;
 
 namespace MediaOverlay;
 
@@ -24,24 +27,89 @@ public partial class MainWindow : Window
     private GlobalSystemMediaTransportControlsSession? _currentSession;
     private string _lastTrackId = string.Empty;
     
+    // Settings
+    private AppSettings _settings = new();
+
+    private void LoadSettings()
+    {
+        try
+        {
+            var folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MediaOverlay");
+            var file = System.IO.Path.Combine(folder, "settings.json");
+            if (File.Exists(file))
+            {
+                var json = File.ReadAllText(file);
+                var loaded = JsonSerializer.Deserialize<AppSettings>(json);
+                if (loaded != null) _settings = loaded;
+            }
+        }
+        catch { }
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            var folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MediaOverlay");
+            Directory.CreateDirectory(folder);
+            var file = System.IO.Path.Combine(folder, "settings.json");
+            var json = JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(file, json);
+        }
+        catch { }
+    }
+
+    // Tray
+    private System.Windows.Forms.NotifyIcon? _notifyIcon;
+    private CancellationTokenSource? _hideTimerCts;
+    
     public MainWindow()
     {
         InitializeComponent();
         Loaded += OnLoaded;
         Closed += OnClosed;
+        MouseDown += (s, e) => {
+            if (!_settings.LockPosition && e.ChangedButton == MouseButton.Left)
+                DragMove();
+        };
+        LocationChanged += (s, e) => {
+            if (IsLoaded)
+            {
+                _settings.WindowLeft = Left;
+                _settings.WindowTop = Top;
+                SaveSettings();
+            }
+        };
     }
     
     private void OnClosed(object? sender, EventArgs e)
     {
         if (_hookID != IntPtr.Zero)
             UnhookWindowsHookEx(_hookID);
+            
+        if (_notifyIcon != null)
+        {
+            _notifyIcon.Visible = false;
+            _notifyIcon.Dispose();
+        }
     }
     
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        PositionTopRight();
-        EnableClickThrough();
+        LoadSettings();
+        if (double.IsNaN(_settings.WindowLeft) || double.IsNaN(_settings.WindowTop))
+        {
+            PositionTopRight();
+        }
+        else
+        {
+            Left = _settings.WindowLeft;
+            Top = _settings.WindowTop;
+        }
+
+        ApplyClickThroughState();
         SetupGlobalHook();
+        SetupTrayIcon();
 
         _sessionManager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
         _sessionManager.CurrentSessionChanged += async (_, _) => await UpdateCurrentSessionAsync();
@@ -62,7 +130,15 @@ public partial class MainWindow : Window
         if (_currentSession != null)
             _currentSession.MediaPropertiesChanged -= OnMediaPropertiesChanged;
 
-        _currentSession = _sessionManager?.GetCurrentSession();
+        if (_settings.ListenOnlyForSpotify && _sessionManager != null)
+        {
+            var sessions = _sessionManager.GetSessions();
+            _currentSession = sessions.FirstOrDefault(s => s.SourceAppUserModelId.Contains("Spotify", StringComparison.OrdinalIgnoreCase));
+        }
+        else
+        {
+            _currentSession = _sessionManager?.GetCurrentSession();
+        }
 
         if (_currentSession != null)
         {
@@ -103,19 +179,18 @@ public partial class MainWindow : Window
             BackgroundImage.ImageSource = artwork;
 
             // Dynamically tint the outline to match the album artwork
-            if (artwork != null)
+            if (artwork != null && _settings.UseDynamicBorderColor)
             {
                 Color accentColor = GetDominantColor(artwork);
                 OverlayBorder.BorderBrush = new SolidColorBrush(accentColor);
             }
             else
             {
-                Color defaultSpotifyGreen = Color.FromRgb(29, 185, 84);
-                OverlayBorder.BorderBrush = new SolidColorBrush(defaultSpotifyGreen);
+                Color defaultColor = Color.FromRgb(64, 64, 64);
+                OverlayBorder.BorderBrush = new SolidColorBrush(defaultColor);
             }
             
-            var sb = (Storyboard)Resources["PopAndGlowStoryboard"];
-            sb.Begin();
+            ShowOverlayTemporarily();
         }));
     }
     
@@ -163,11 +238,14 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern int SetWindowLong(IntPtr hwnd, int index, int newStyle);
 
-    private void EnableClickThrough()
+    private void ApplyClickThroughState()
     {
         var hwnd = new WindowInteropHelper(this).Handle;
         int extendedStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
-        SetWindowLong(hwnd, GWL_EXSTYLE, extendedStyle | WS_EX_TRANSPARENT);
+        if (_settings.LockPosition)
+            SetWindowLong(hwnd, GWL_EXSTYLE, extendedStyle | WS_EX_TRANSPARENT);
+        else
+            SetWindowLong(hwnd, GWL_EXSTYLE, extendedStyle & ~WS_EX_TRANSPARENT);
     }
     #endregion
 
@@ -208,7 +286,7 @@ public partial class MainWindow : Window
         if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
         {
             int vkCode = Marshal.ReadInt32(lParam);
-            if (vkCode == 0x1B) // VK_ESCAPE
+            if (vkCode == 0x1B && _settings.EnableEscKeyHiding) // VK_ESCAPE
             {
                 Dispatcher.Invoke(HideOverlay);
             }
@@ -226,4 +304,148 @@ public partial class MainWindow : Window
         CardContainer.BeginAnimation(UIElement.OpacityProperty, fadeOut);
     }
     #endregion
+
+    #region Settings and Tray Icon
+    private bool CheckStartWithWindows()
+    {
+        using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false);
+        return key?.GetValue("MediaOverlay") != null;
+    }
+
+    private void SetStartWithWindows(bool enable)
+    {
+        using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
+        if (enable)
+        {
+            string path = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
+            key?.SetValue("MediaOverlay", $"\"{path}\"");
+        }
+        else
+        {
+            key?.DeleteValue("MediaOverlay", false);
+        }
+    }
+
+    private void SetupTrayIcon()
+    {
+        _notifyIcon = new System.Windows.Forms.NotifyIcon
+        {
+            Icon = System.Drawing.SystemIcons.Information,
+            Visible = true,
+            Text = "Media Overlay"
+        };
+
+        var menu = new System.Windows.Forms.ContextMenuStrip();
+
+        var mnuShow = new System.Windows.Forms.ToolStripMenuItem("Show overlay", null, (s, e) => ShowOverlayTemporarily());
+        
+        var mnuKeepVisible = new System.Windows.Forms.ToolStripMenuItem("Keep overlay visible", null, (s, e) => 
+        {
+            _settings.KeepOverlayVisible = !_settings.KeepOverlayVisible;
+            ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.KeepOverlayVisible;
+            if (!_settings.KeepOverlayVisible) HideOverlay(); // hide immediately if untoggled
+            else ShowOverlayTemporarily(); // show if toggled on
+            SaveSettings();
+        }) { Checked = _settings.KeepOverlayVisible };
+
+        var mnuEscHiding = new System.Windows.Forms.ToolStripMenuItem("Enable ESC key hiding", null, (s, e) => 
+        {
+            _settings.EnableEscKeyHiding = !_settings.EnableEscKeyHiding;
+            ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.EnableEscKeyHiding;
+            SaveSettings();
+        }) { Checked = _settings.EnableEscKeyHiding };
+
+        var mnuSpotify = new System.Windows.Forms.ToolStripMenuItem("Listen only for Spotify", null, async (s, e) => 
+        {
+            _settings.ListenOnlyForSpotify = !_settings.ListenOnlyForSpotify;
+            ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.ListenOnlyForSpotify;
+            SaveSettings();
+            await UpdateCurrentSessionAsync();
+        }) { Checked = _settings.ListenOnlyForSpotify };
+
+        var mnuLockPosition = new System.Windows.Forms.ToolStripMenuItem("Lock position", null, (s, e) => 
+        {
+            _settings.LockPosition = !_settings.LockPosition;
+            ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.LockPosition;
+            ApplyClickThroughState();
+            SaveSettings();
+        }) { Checked = _settings.LockPosition };
+
+        var mnuStartWindows = new System.Windows.Forms.ToolStripMenuItem("Start with Windows", null, (s, e) => 
+        {
+            bool currentState = CheckStartWithWindows();
+            SetStartWithWindows(!currentState);
+            ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = !currentState;
+        }) { Checked = CheckStartWithWindows() };
+
+        var mnuDynamicBorder = new System.Windows.Forms.ToolStripMenuItem("Use dynamic border color", null, (s, e) => 
+        {
+            _settings.UseDynamicBorderColor = !_settings.UseDynamicBorderColor;
+            ((System.Windows.Forms.ToolStripMenuItem)s!).Checked = _settings.UseDynamicBorderColor;
+            SaveSettings();
+            
+            // Re-trigger color update
+            _ = UpdateCurrentSessionAsync();
+        }) { Checked = _settings.UseDynamicBorderColor };
+
+        var mnuResetPos = new System.Windows.Forms.ToolStripMenuItem("Reset position", null, (s, e) => 
+        {
+            PositionTopRight();
+            _settings.WindowLeft = Left;
+            _settings.WindowTop = Top;
+            SaveSettings();
+        });
+
+        var mnuExit = new System.Windows.Forms.ToolStripMenuItem("Exit", null, (s, e) => Application.Current.Shutdown());
+
+        menu.Items.Add(mnuShow);
+        menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        menu.Items.Add(mnuKeepVisible);
+        menu.Items.Add(mnuEscHiding);
+        menu.Items.Add(mnuSpotify);
+        menu.Items.Add(mnuLockPosition);
+        menu.Items.Add(mnuStartWindows);
+        menu.Items.Add(mnuDynamicBorder);
+        menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        menu.Items.Add(mnuResetPos);
+        menu.Items.Add(mnuExit);
+
+        _notifyIcon.ContextMenuStrip = menu;
+    }
+
+    private async void ShowOverlayTemporarily()
+    {
+        var sb = (Storyboard)Resources["PopAndGlowStoryboard"];
+        sb.Begin();
+
+        _hideTimerCts?.Cancel();
+        
+        if (!_settings.KeepOverlayVisible)
+        {
+            _hideTimerCts = new CancellationTokenSource();
+            var token = _hideTimerCts.Token;
+
+            try
+            {
+                await Task.Delay(4000, token);
+                if (!token.IsCancellationRequested && !_settings.KeepOverlayVisible)
+                {
+                    HideOverlay();
+                }
+            }
+            catch (TaskCanceledException) { }
+        }
+    }
+    #endregion
+}
+
+public class AppSettings
+{
+    public bool KeepOverlayVisible { get; set; } = false;
+    public bool EnableEscKeyHiding { get; set; } = true;
+    public bool ListenOnlyForSpotify { get; set; } = true;
+    public bool LockPosition { get; set; } = true;
+    public bool UseDynamicBorderColor { get; set; } = true;
+    public double WindowLeft { get; set; } = double.NaN;
+    public double WindowTop { get; set; } = double.NaN;
 }
