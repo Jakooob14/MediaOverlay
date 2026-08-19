@@ -197,6 +197,15 @@ public partial class MainWindow : Window
             AlbumArtImage.ImageSource = artwork;
             BackgroundImage.ImageSource = artwork;
 
+            if (artwork != null)
+            {
+                MaskBorder.Background = new SolidColorBrush(Colors.White);
+            }
+            else
+            {
+                MaskBorder.Background = new SolidColorBrush(Color.FromRgb(40, 40, 40));
+            }
+
             // Dynamically tint the outline to match the album artwork
             if (artwork != null && _settings.UseDynamicBorderColor)
             {
