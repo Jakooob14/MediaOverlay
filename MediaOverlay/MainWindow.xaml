@@ -38,7 +38,7 @@
         <Border x:Name="CardContainer"
                         CornerRadius="8"
                         Margin="15"
-                        Opacity="1">
+                        Opacity="0">
             
             <!-- <Border.RenderTransform> -->
             <!--     <TranslateTransform x:Name="TranslateTransform" Y="50"/> -->
